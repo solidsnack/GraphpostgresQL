@@ -51,17 +51,28 @@ type.
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
+CREATE FUNCTION graphql.to_sql(expr text)
+RETURNS TABLE (query text) AS $$
+BEGIN
+  RETURN QUERY SELECT graphql.to_sql(selector, predicate, body)
+                 FROM graphql.parse_many(expr);
+END
+$$ LANGUAGE plpgsql STABLE STRICT;
+
 CREATE FUNCTION graphql.to_sql(selector text, predicate text, body text)
-RETURNS json AS $$
-  query text;
+RETURNS text AS $$
+DECLARE
+  q text;
   tab regclass = selector::regclass;       -- Without a parent, we need a table
   cols text[];
   pk text;
+  sub record;
 BEGIN
-  query := 'FROM ' || tab;                          -- Regclass is auto-escaped
+  q := 'FROM ' || tab;                              -- Regclass is auto-escaped
+  body := substr(body, 2, length(body)-2);
   IF predicate IS NOT NULL THEN
-    pk := 'id';             -- TODO: Figure how to get the primary key for real
-    query := query || format(' WHERE %I = %L', pk, predicate);
+    pk := 'id';                 -- TODO: Figure how to get the real primary key
+    q := q || format(' WHERE %I = %L', pk, predicate);
   END IF;
   FOR sub IN SELECT * FROM graphql.parse_many(body) LOOP
     IF sub.predicate IS NOT NULL THEN
@@ -70,23 +81,14 @@ BEGIN
     END IF;
     --- TODO: Handle nested lookup into JSON, HStore, RECORD
     --- TODO: Introduce foreign key magicks
-    cols := cols || format('%L', sub.selector);
+    cols := cols || format('%I', sub.selector);
   END LOOP;
-  IF cols = ARRAY[]::text[] THEN
-    query := 'SELECT * ' || query;
+  IF cols > ARRAY[]::text[] THEN
+    q := 'SELECT ' || array_to_string(cols, ', ') || ' ' || q;
   ELSE
-    query := 'SELECT ' || array_to_string(cols, ', ') || ' ' || query;
+    q := 'SELECT * ' || q;
   END IF;
-END
-$$ LANGUAGE plpgsql STABLE STRICT;
-
-CREATE FUNCTION graphql.interpret(selector text,
-                                  predicate text,
-                                  body text,
-                                  parent regclass)
-RETURNS json AS $$
-BEGIN
-
+  RETURN q;
 END
 $$ LANGUAGE plpgsql STABLE STRICT;
 
@@ -101,6 +103,7 @@ BEGIN
   --- * Consume a comma if present.
   --- * Consume whitespace.
   --- * Repeat until the input is empty.
+  expr := ltrim(expr, whitespace);
   WHILE expr != '' LOOP
     SELECT * FROM graphql.parse_one(expr) INTO selector, predicate, body, expr;
     RETURN NEXT;
@@ -121,23 +124,22 @@ CREATE FUNCTION graphql.parse_one(expr text,
 AS $$
 DECLARE
   label text = '[a-zA-Z_][a-zA-Z0-9_]+';
-  selector_re text = '^(' || label || ')' || '([(]([^()]+)[)])?'; 
+  selector_re text = '^(' || label || ')' || '([(]([^()]+)[)])?';
   matches text[];
   whitespace text = E' \t\n';
   idx integer = 0;
   nesting integer = 0;
+  brackety boolean = FALSE;
   c text;
 BEGIN
   --- To parse one expression:
   --- * Consume whitespace.
   --- * Find a selector.
   --- * Consume whitespace.
-  --- * Find a left bracket.
-  --- * Balance brackets.
+  --- * Find a left bracket or stop.
+  ---   * If there is a left bracket, balance brackets.
+  ---   * If there is something else, return.
   expr := ltrim(expr, whitespace);
-  --- Replacing all whitespace like this is safe because we don't allow any
-  --- quoted literals yet.
-  --- expr := regexp_replace(expr, '['||whitespace||']+', ' ', 'g');
   matches := regexp_matches(expr, selector_re);
   selector := matches[1];
   predicate := matches[3];
@@ -151,17 +153,19 @@ BEGIN
     CASE
     WHEN c = '{' THEN
       nesting := nesting + 1;
-    WHEN c = '}' THEN
+      brackety := TRUE;
+    WHEN c = '}' AND brackety THEN
       nesting := nesting - 1;
       EXIT WHEN nesting = 0;
-    WHEN nesting <= 0 THEN
+    WHEN nesting < 0 THEN
       RAISE EXCEPTION 'Brace nesting error (in "%")',
                       graphql.excerpt(expr, idx, 50);
     ELSE
+      EXIT WHEN NOT brackety;
       --- Do nothing.
     END CASE;
   END LOOP;
-  body := substr(expr, 1, idx); 
+  body := substr(expr, 1, idx);
   remainder := substr(expr, idx+1);
 END
 $$ LANGUAGE plpgsql IMMUTABLE STRICT;
