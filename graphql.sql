@@ -65,17 +65,16 @@ DECLARE
   q text;
   tab regclass = selector::regclass;       -- Without a parent, we need a table
   cols text[];
-  pk text;
   sub record;
+  pk text;
 BEGIN
   q := 'FROM ' || tab;                              -- Regclass is auto-escaped
   body := substr(body, 2, length(body)-2);
   IF predicate IS NOT NULL THEN
-    pk := 'id';                 -- TODO: Figure how to get the real primary key
-    q := q || format(' WHERE %I = %L', pk, predicate);
-    --- TODO: Include cast to type of primary key
-    --- TODO: When the type of the primary key is an integer literal and the
-    ---       predicate value is all digits, don't quote it at all.
+    SELECT array_to_string(array_agg(format('%I', col)), ', ')
+      FROM graphql.pk(tab) INTO pk;
+    q := q || E'\n WHERE (' || pk || ') = (' || predicate || ')';
+    --- Compound primary keys are okay, since we naively trust the input...
   END IF;
   FOR sub IN SELECT * FROM graphql.parse_many(body) LOOP
     IF sub.predicate IS NOT NULL THEN
@@ -87,9 +86,9 @@ BEGIN
     cols := cols || format('%I', sub.selector);
   END LOOP;
   IF cols > ARRAY[]::text[] THEN
-    q := 'SELECT ' || array_to_string(cols, ', ') || ' ' || q;
+    q := 'SELECT ' || array_to_string(cols, ', ') || E' \n  ' || q;
   ELSE
-    q := 'SELECT * ' || q;
+    q := 'SELECT *' || E' \n  ' || q;
   END IF;
   RETURN q;
 END
@@ -123,10 +122,9 @@ CREATE FUNCTION graphql.parse_one(expr text,
                                   OUT selector text,
                                   OUT predicate text,
                                   OUT body text,
-                                  OUT remainder text)
-AS $$
+                                  OUT remainder text) AS $$
 DECLARE
-  label text = '[a-zA-Z_][a-zA-Z0-9_]+';
+  label text = '[a-zA-Z_][a-zA-Z0-9_]*';
   selector_re text = '^(' || label || ')' || '([(]([^()]+)[)])?';
   matches text[];
   whitespace text = E' \t\n';
@@ -165,13 +163,22 @@ BEGIN
                       graphql.excerpt(expr, idx, 50);
     ELSE
       EXIT WHEN NOT brackety;
-      --- Do nothing.
     END CASE;
   END LOOP;
   body := substr(expr, 1, idx);
   remainder := substr(expr, idx+1);
 END
 $$ LANGUAGE plpgsql IMMUTABLE STRICT;
+
+CREATE FUNCTION graphql.pk(tab regclass)
+RETURNS TABLE (col name, typ regtype) AS $$
+  SELECT attname, atttypid::regtype
+    FROM pg_index JOIN pg_attribute ON (attnum = ANY (indkey))
+   WHERE indrelid = tab AND indisprimary AND attrelid = tab AND attnum > 0
+   ORDER BY attnum
+$$ LANGUAGE sql STABLE STRICT;
+--- NB: For SELECTs, it would be okay just to return the column numbers. One
+---     could skip the JOIN with pg_attribute, resulting in a faster query.
 
 CREATE FUNCTION graphql.excerpt(str text, start integer, length integer)
 RETURNS text AS $$
