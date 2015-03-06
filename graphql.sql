@@ -73,6 +73,9 @@ BEGIN
   IF predicate IS NOT NULL THEN
     pk := 'id';                 -- TODO: Figure how to get the real primary key
     q := q || format(' WHERE %I = %L', pk, predicate);
+    --- TODO: Include cast to type of primary key
+    --- TODO: When the type of the primary key is an integer literal and the
+    ---       predicate value is all digits, don't quote it at all.
   END IF;
   FOR sub IN SELECT * FROM graphql.parse_many(body) LOOP
     IF sub.predicate IS NOT NULL THEN
