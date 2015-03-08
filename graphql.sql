@@ -1,3 +1,6 @@
+BEGIN;
+
+DROP SCHEMA IF EXISTS graphql CASCADE;
 CREATE SCHEMA graphql;
 
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
@@ -51,7 +54,12 @@ type.
 
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
-CREATE FUNCTION graphql.to_sql(expr text)
+SET LOCAL search_path TO graphql; -- Definitions will be created in this schema
+--- However, we must still qualify references between functions -- as when
+--- to_sql calls parse_many -- because the search_path will be different when
+--- the code is run by the application/user.
+
+CREATE FUNCTION to_sql(expr text)
 RETURNS TABLE (query text) AS $$
 BEGIN
   RETURN QUERY SELECT graphql.to_sql(selector, predicate, body)
@@ -59,18 +67,23 @@ BEGIN
 END
 $$ LANGUAGE plpgsql STABLE STRICT;
 
-CREATE FUNCTION graphql.to_sql(selector text, predicate text, body text)
+CREATE FUNCTION to_sql(selector text, predicate text, body text)
 RETURNS text AS $$
 DECLARE
   q text;
   tab regclass = selector::regclass;       -- Without a parent, we need a table
   cols text[];
+  col text;
   sub record;
-  pk text;
+  pk text = NULL;
+  fk record;
+  subselects text[];
 BEGIN
   q := 'FROM ' || tab;                              -- Regclass is auto-escaped
   body := substr(body, 2, length(body)-2);
   IF predicate IS NOT NULL THEN
+    SELECT array_to_string(array_agg(format('%I', col)), ', ')
+      FROM unnest(graphql.pk(tab)) INTO pk;
     SELECT array_to_string(array_agg(format('%I', col)), ', ')
       FROM graphql.pk(tab) INTO pk;
     q := q || E'\n WHERE (' || pk || ') = (' || predicate || ')';
@@ -81,20 +94,74 @@ BEGIN
       RAISE EXCEPTION 'Unhandled nested selector %(%)',
                       sub.selector, sub.predicate;
     END IF;
-    --- TODO: Handle nested lookup into JSON, HStore, RECORD
-    --- TODO: Introduce foreign key magicks
-    cols := cols || format('%I', sub.selector);
+    SELECT col FROM cols(tab) WHERE col = sub.selector INTO col;
+    CASE
+    WHEN FOUND AND sub.body IS NULL THEN           -- A simple column reference
+      SELECT * FROM graphql.fk(tab)
+       WHERE cols[1] = col AND cardinality(cols) = 1
+        INTO fk; -- TODO: If there's more than one, emit a clear message.
+      IF FOUND THEN
+        subselects := subselects
+                   || format(E'SELECT to_json(%1$I) AS %4$I FROM %1$I\n'
+                              ' WHERE %1$I.%2$I = %3$I.%4$I',
+                             fk.other, fk.refs[1], tab, col);
+        cols := cols || format('%I.%I', 'sub/'||cardinality(subselects), col);
+      ELSE
+        cols := cols || format('%I', col);
+      END IF;
+    WHEN FOUND AND sub.body IS NOT NULL THEN             -- Index into a column
+      --- TODO: Handle nested lookup into JSON, HStore, RECORD
+      --- TODO: If col REFERENCES something, push lookup down to it
+    WHEN NOT FOUND THEN             -- It might be a reference to another table
+      SELECT fk.*
+        FROM graphql.fk(sub.selector),
+             LATERAL (SELECT num FROM graphql.cols(tab)
+                       WHERE col = fk.cols[1]) AS _
+       WHERE cardinality(fk.cols) = 1 AND fk.tab = to_sql.tab
+       ORDER BY _.num LIMIT 1 INTO fk;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'Not able to construct a JOIN for missing column: %',
+                        sub.selector;
+      END IF;
+      --- If:
+      --- * Thare are two and only two foreign keys for the other table, and
+      --- * All the columns of the table participate in one or the other
+      ---   foreign key, then
+      --- * We can treat the table as a JOIN table and follow the keys.
+      --- Otherwise:
+      --- * We use the existence of the foreign key to look up the record in
+      ---   the table that JOINs with us.
+      --- Whenever we are looking at a table that REFERENCES us, we assume it
+      --- is a many-to-one relationship; and expect to return an array-valued
+      --- result.
+      IF FALSE THEN
+        --- Recursion happens in here
+      ELSE
+        --- Recursion happens in here
+      END IF;
+    ELSE
+      RAISE EXCEPTION 'Not able to interpret this selector: %', sub.selector;
+    END CASE;
   END LOOP;
-  IF cols > ARRAY[]::text[] THEN
-    q := 'SELECT ' || array_to_string(cols, ', ') || E' \n  ' || q;
-  ELSE
-    q := 'SELECT *' || E' \n  ' || q;
-  END IF;
+  DECLARE
+    column_expression text;
+  BEGIN
+    IF cols > ARRAY[]::text[] THEN
+      column_expression := array_to_string(cols, ', ');
+    ELSE
+      column_expression := format('%I', tab);
+    END IF;
+    IF pk IS NOT NULL THEN                              -- Implies single result
+      q := 'SELECT to_json('  || column_expression || E')\n  ' || q;
+    ELSE
+      q := 'SELECT json_agg(' || column_expression || E')\n  ' || q;
+    END IF;
+  END;
   RETURN q;
 END
 $$ LANGUAGE plpgsql STABLE STRICT;
 
-CREATE FUNCTION graphql.parse_many(expr text)
+CREATE FUNCTION parse_many(expr text)
 RETURNS TABLE (selector text, predicate text, body text) AS $$
 DECLARE
   whitespace text = E' \t\n';
@@ -118,11 +185,11 @@ BEGIN
 END
 $$ LANGUAGE plpgsql IMMUTABLE STRICT;
 
-CREATE FUNCTION graphql.parse_one(expr text,
-                                  OUT selector text,
-                                  OUT predicate text,
-                                  OUT body text,
-                                  OUT remainder text) AS $$
+CREATE FUNCTION parse_one(expr text,
+                          OUT selector text,
+                          OUT predicate text,
+                          OUT body text,
+                          OUT remainder text) AS $$
 DECLARE
   label text = '[a-zA-Z_][a-zA-Z0-9_]*';
   selector_re text = '^(' || label || ')' || '([(]([^()]+)[)])?';
@@ -170,17 +237,67 @@ BEGIN
 END
 $$ LANGUAGE plpgsql IMMUTABLE STRICT;
 
-CREATE FUNCTION graphql.pk(tab regclass)
-RETURNS TABLE (col name, typ regtype) AS $$
-  SELECT attname, atttypid::regtype
-    FROM pg_index JOIN pg_attribute ON (attnum = ANY (indkey))
-   WHERE indrelid = tab AND indisprimary AND attrelid = tab AND attnum > 0
-   ORDER BY attnum
-$$ LANGUAGE sql STABLE STRICT;
---- NB: For SELECTs, it would be okay just to return the column numbers. One
----     could skip the JOIN with pg_attribute, resulting in a faster query.
-
-CREATE FUNCTION graphql.excerpt(str text, start integer, length integer)
+CREATE FUNCTION excerpt(str text, start integer, length integer)
 RETURNS text AS $$
   SELECT substr(regexp_replace(str, '[ \n\t]+', ' ', 'g'), start, length);
 $$ LANGUAGE sql IMMUTABLE STRICT;
+
+
+ /* * * * * * * * * * * * * Table inspection functions * * * * * * * * * * * */
+
+CREATE VIEW pk AS
+SELECT attrelid::regclass AS tab,
+       array_agg(attname)::name[] AS cols
+  FROM pg_attribute
+  JOIN pg_index ON (attrelid = indrelid AND attnum = ANY (indkey))
+ WHERE indisprimary
+ GROUP BY attrelid;
+
+CREATE VIEW cols AS
+SELECT attrelid::regclass AS tab,
+       attname::name AS col,
+       atttypid::regtype AS typ,
+       attnum AS num
+  FROM pg_attribute
+ WHERE attnum > 0
+ ORDER BY attrelid, attnum;
+
+CREATE VIEW fk AS
+SELECT conrelid::regclass AS tab,
+       names.cols,
+       confrelid::regclass AS other,
+       names.refs
+  FROM pg_constraint,
+       LATERAL (SELECT array_agg(cols.attname) AS cols,
+                       array_agg(refs.attname) AS refs
+                  FROM unnest(conkey, confkey) AS _(col, ref),
+                       LATERAL (SELECT * FROM pg_attribute
+                                 WHERE attrelid = conrelid AND attnum = col)
+                            AS cols,
+                       LATERAL (SELECT * FROM pg_attribute
+                                 WHERE attrelid = confrelid AND attnum = ref)
+                            AS refs)
+            AS names
+ WHERE confrelid != 0;
+
+CREATE FUNCTION ns(tab regclass) RETURNS name AS $$
+  SELECT nspname
+    FROM pg_class JOIN pg_namespace ON (pg_namespace.oid = relnamespace)
+   WHERE pg_class.oid = tab
+$$ LANGUAGE sql STABLE STRICT;
+
+CREATE FUNCTION pk(t regclass) RETURNS name[] AS $$
+  SELECT cols FROM meta.pk WHERE meta.pk.tab = t;
+$$ LANGUAGE sql STABLE STRICT;
+
+CREATE FUNCTION cols(t regclass)
+RETURNS TABLE (num smallint, col name, typ regtype) AS $$
+  SELECT num, col, typ FROM meta.cols WHERE meta.cols.tab = t;
+$$ LANGUAGE sql STABLE STRICT;
+
+CREATE FUNCTION fk(t regclass)
+RETURNS TABLE (cols name[], other regclass, refs name[]) AS $$
+  SELECT cols, other, refs FROM meta.fk WHERE meta.fk.tab = t;
+$$ LANGUAGE sql STABLE STRICT;
+
+COMMIT;
