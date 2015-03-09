@@ -158,20 +158,22 @@ BEGIN
     ELSE
       column_expression := format('%I', tab);
     END IF;
-    IF pk IS NOT NULL THEN                              -- Implies single result
-      q := 'SELECT to_json('  || column_expression || E')\n  ' || q;
+    IF pk IS NOT NULL THEN                             -- Implies single result
+      q := 'SELECT to_json('  || column_expression || ')' || q;
     ELSE
-      q := 'SELECT json_agg(' || column_expression || E')\n  ' || q;
+      q := 'SELECT json_agg(' || column_expression || ')' || q;
     END IF;
   END;
   q := q || format(E'\n  FROM %I', tab);
   FOR n IN 1..cardinality(subselects) LOOP
-    q := q || E',\n'
-           || E'LATERAL (\n'
-           || graphql.indent(subselects[i])
-           || E'\n) AS ' || format('%I', 'sub/'||i);
-    --- TODO: Switch to abstract representation of subqueries so we don't end
-    ---       up reindenting the same lines multiple times.
+    q := q || array_to_string(ARRAY[
+                ',',
+                graphql.indent(7, 'LATERAL ('), -- 7 to line up with SELECT ...
+                graphql.indent(9, subselects[i]),    -- 9 to be 2 under LATERAL
+                graphql.indent(7, ') AS ' || format('%I', 'sub/'||i))
+              ], E'\n');
+    --- TODO: Find an "indented text" abstraction so we don't split and
+    ---       recombine the same lines so many times.
   END LOOP;
   FOR n IN 1..cardinality(predicates) LOOP
     IF n = 1 THEN
@@ -268,11 +270,11 @@ RETURNS text AS $$
   SELECT substr(regexp_replace(str, '[ \n\t]+', ' ', 'g'), start, length);
 $$ LANGUAGE sql IMMUTABLE STRICT;
 
-CREATE FUNCTION indent(str text)
+CREATE FUNCTION indent(level integer, str text)
 RETURNS text AS $$
   SELECT array_to_string(array_agg(s), E'\n')
     FROM unnest(string_to_array(str, E'\n')) AS _(ln),
-         LATERAL (SELECT CASE ln WHEN '' THEN ln ELSE '  ' || ln)
+         LATERAL (SELECT CASE ln WHEN '' THEN ln ELSE repeat(' ', level) || ln)
               AS indented(s)
 $$ LANGUAGE sql IMMUTABLE STRICT;
 
