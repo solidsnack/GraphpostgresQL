@@ -71,22 +71,20 @@ CREATE FUNCTION to_sql(selector text, predicate text, body text)
 RETURNS text AS $$
 DECLARE
   q text;
-  tab regclass = selector::regclass;       -- Without a parent, we need a table
+  tab regclass = selector::regclass;         -- We need a table, to select from
   cols text[];
   col text;
   sub record;
   pk text = NULL;
   fk record;
   subselects text[];
+  predicates text[];
 BEGIN
-  q := 'FROM ' || tab;                              -- Regclass is auto-escaped
   body := substr(body, 2, length(body)-2);
   IF predicate IS NOT NULL THEN
     SELECT array_to_string(array_agg(format('%I', col)), ', ')
       FROM unnest(graphql.pk(tab)) INTO pk;
-    SELECT array_to_string(array_agg(format('%I', col)), ', ')
-      FROM graphql.pk(tab) INTO pk;
-    q := q || E'\n WHERE (' || pk || ') = (' || predicate || ')';
+    predicates := predicates || format('(%s) = (%s)', pk, predicate);
     --- Compound primary keys are okay, since we naively trust the input...
   END IF;
   FOR sub IN SELECT * FROM graphql.parse_many(body) LOOP
@@ -98,12 +96,13 @@ BEGIN
     CASE
     WHEN FOUND AND sub.body IS NULL THEN           -- A simple column reference
       SELECT * FROM graphql.fk(tab)
-       WHERE cols[1] = col AND cardinality(cols) = 1
+       WHERE cardinality(cols) = 1 AND cols[1] = col
         INTO fk; -- TODO: If there's more than one, emit a clear message.
       IF FOUND THEN
         subselects := subselects
-                   || format(E'SELECT to_json(%1$I) AS %4$I FROM %1$I\n'
-                              ' WHERE %1$I.%2$I = %3$I.%4$I',
+                   || format('SELECT to_json(%1$I) AS %4$I FROM %1$I'
+                            E'\n'
+                             ' WHERE %1$I.%2$I = %3$I.%4$I',
                              fk.other, fk.refs[1], tab, col);
         cols := cols || format('%I.%I', 'sub/'||cardinality(subselects), col);
       ELSE
@@ -131,14 +130,22 @@ BEGIN
       --- Otherwise:
       --- * We use the existence of the foreign key to look up the record in
       ---   the table that JOINs with us.
+      ---
       --- Whenever we are looking at a table that REFERENCES us, we assume it
       --- is a many-to-one relationship; and expect to return an array-valued
-      --- result.
+      --- result. However, it should be possible to recognize a one-to-one
+      --- relationship via the presence of a UNIQUE constraint, in which case
+      --- we ought to return a scalar result.
       IF FALSE THEN
+        subquery := subquery
+                 || graphql.to_sql(sub.selector, sub.predicate, sub.body);
         --- Recursion happens in here
       ELSE
         --- Recursion happens in here
+        subquery := subquery
+                 || graphql.to_sql(sub.selector, sub.predicate, sub.body);
       END IF;
+      --
     ELSE
       RAISE EXCEPTION 'Not able to interpret this selector: %', sub.selector;
     END CASE;
@@ -157,6 +164,22 @@ BEGIN
       q := 'SELECT json_agg(' || column_expression || E')\n  ' || q;
     END IF;
   END;
+  q := q || format(E'\n  FROM %I', tab);
+  FOR n IN 1..cardinality(subselects) LOOP
+    q := q || E',\n'
+           || E'LATERAL (\n'
+           || graphql.indent(subselects[i])
+           || E'\n) AS ' || format('%I', 'sub/'||i);
+    --- TODO: Switch to abstract representation of subqueries so we don't end
+    ---       up reindenting the same lines multiple times.
+  END LOOP;
+  FOR n IN 1..cardinality(predicates) LOOP
+    IF n = 1 THEN
+      q := q || E'\n WHERE (' || predicates[i] || ')';
+    ELSE
+      q := q || E'\n   AND (' || predicates[i] || ')';
+    END IF;
+  END LOOP;
   RETURN q;
 END
 $$ LANGUAGE plpgsql STABLE STRICT;
@@ -237,9 +260,20 @@ BEGIN
 END
 $$ LANGUAGE plpgsql IMMUTABLE STRICT;
 
+
+ /* * * * * * * * * * * * * * * * Text utilities * * * * * * * * * * * * * * */
+
 CREATE FUNCTION excerpt(str text, start integer, length integer)
 RETURNS text AS $$
   SELECT substr(regexp_replace(str, '[ \n\t]+', ' ', 'g'), start, length);
+$$ LANGUAGE sql IMMUTABLE STRICT;
+
+CREATE FUNCTION indent(str text)
+RETURNS text AS $$
+  SELECT array_to_string(array_agg(s), E'\n')
+    FROM unnest(string_to_array(str, E'\n')) AS _(ln),
+         LATERAL (SELECT CASE ln WHEN '' THEN ln ELSE '  ' || ln)
+              AS indented(s)
 $$ LANGUAGE sql IMMUTABLE STRICT;
 
 
