@@ -72,11 +72,11 @@ RETURNS text AS $$
 DECLARE
   q text;
   tab regclass = selector::regclass;         -- We need a table, to select from
-  cols text[];
-  col text;
+  cols name[];
+  col name;
   sub record;
   pk text = NULL;
-  fk record;
+  fks record[];
   subselects text[];
   predicates text[];
 BEGIN
@@ -92,60 +92,32 @@ BEGIN
       RAISE EXCEPTION 'Unhandled nested selector %(%)',
                       sub.selector, sub.predicate;
     END IF;
-    SELECT col FROM cols(tab) WHERE col = sub.selector INTO col;
+    SELECT col FROM cols(tab) WHERE cols.col = sub.selector INTO col;
     CASE
     WHEN FOUND AND sub.body IS NULL THEN           -- A simple column reference
       SELECT * FROM graphql.fk(tab)
        WHERE cardinality(cols) = 1 AND cols[1] = col
-        INTO fk; -- TODO: If there's more than one, emit a clear message.
+        INTO fks;
       IF FOUND THEN
+        IF cardinality(fks) > 1 THEN
+          RAISE EXCEPTION 'Multiple candidate foreign keys for %(%)', tab, col;
+        END IF;
         subselects := subselects
-                   || format('SELECT to_json(%1$I) AS %4$I FROM %1$I'
-                            E'\n'
-                             ' WHERE %1$I.%2$I = %3$I.%4$I',
-                             fk.other, fk.refs[1], tab, col);
+                   || format(E'SELECT to_json(%1$I) AS %4$I FROM %1$I\n'
+                              ' WHERE %1$I.%2$I = %3$I.%4$I',
+                             fks[1].other, fks[1].refs[1], tab, col);
         cols := cols || format('%I.%I', 'sub/'||cardinality(subselects), col);
       ELSE
         cols := cols || format('%I', col);
       END IF;
     WHEN FOUND AND sub.body IS NOT NULL THEN             -- Index into a column
+      subselects := subselects || graphql.to_sql(sub.*, tab);
       --- TODO: Handle nested lookup into JSON, HStore, RECORD
       --- TODO: If col REFERENCES something, push lookup down to it
+      cols := cols || format('%I.%I', 'sub/'||cardinality(subselects), col);
     WHEN NOT FOUND THEN             -- It might be a reference to another table
-      SELECT fk.*
-        FROM graphql.fk(sub.selector),
-             LATERAL (SELECT num FROM graphql.cols(tab)
-                       WHERE col = fk.cols[1]) AS _
-       WHERE cardinality(fk.cols) = 1 AND fk.tab = to_sql.tab
-       ORDER BY _.num LIMIT 1 INTO fk;
-      IF NOT FOUND THEN
-        RAISE EXCEPTION 'Not able to construct a JOIN for missing column: %',
-                        sub.selector;
-      END IF;
-      --- If:
-      --- * Thare are two and only two foreign keys for the other table, and
-      --- * All the columns of the table participate in one or the other
-      ---   foreign key, then
-      --- * We can treat the table as a JOIN table and follow the keys.
-      --- Otherwise:
-      --- * We use the existence of the foreign key to look up the record in
-      ---   the table that JOINs with us.
-      ---
-      --- Whenever we are looking at a table that REFERENCES us, we assume it
-      --- is a many-to-one relationship; and expect to return an array-valued
-      --- result. However, it should be possible to recognize a one-to-one
-      --- relationship via the presence of a UNIQUE constraint, in which case
-      --- we ought to return a scalar result.
-      IF FALSE THEN
-        subquery := subquery
-                 || graphql.to_sql(sub.selector, sub.predicate, sub.body);
-        --- Recursion happens in here
-      ELSE
-        --- Recursion happens in here
-        subquery := subquery
-                 || graphql.to_sql(sub.selector, sub.predicate, sub.body);
-      END IF;
-      --
+      subselects := subselects || graphql.to_sql(sub.*, tab, sub.selector);
+      cols := cols || format('%I.%I', 'sub/'||cardinality(subselects), col);
     ELSE
       RAISE EXCEPTION 'Not able to interpret this selector: %', sub.selector;
     END CASE;
@@ -186,6 +158,97 @@ BEGIN
 END
 $$ LANGUAGE plpgsql STABLE STRICT;
 
+CREATE FUNCTION to_sql(selector text, predicate text, body text, tab regclass)
+RETURNS text AS $$
+DECLARE
+  q text;
+  col name;
+  typ regtype;
+  lookups text[];
+  labels text[];
+BEGIN
+  SELECT col, typ FROM cols(tab) WHERE cols.col = selector INTO col, typ;
+  IF NOT FOUND THEN
+    RAISE EXCEPTION 'Did not find column % on table %', col, tab;
+  END IF;
+  FOR sub IN SELECT * FROM graphql.parse_many(body) LOOP
+    IF sub.predicate IS NOT NULL THEN
+      RAISE EXCEPTION 'Not able to handle predicates when following lookups '
+                      'into columns (for field % under %.%)',
+                      sub.selector, tab, col;
+    END IF;
+    CASE typ
+    WHEN regtype('jsonb'), regtype('json') THEN
+      IF sub.body IS NOT NULL THEN                 -- TODO: Nested JSON lookups
+        RAISE EXCEPTION 'Nested JSON lookup is as yet unimplemented';
+      END IF;
+    WHEN regtype('hstore') THEN
+      IF sub.body IS NOT NULL THEN
+        RAISE EXCEPTION 'No fields below this level (column % is hstore)',
+                        tab, col;
+      END IF;
+    ELSE
+      RAISE EXCEPTION 'Unhandled nested type %s for %s.%s', typ, tab, col;
+    END CASE;
+    lookups := lookups || format('->%L', sub.selector);
+    labels  := labels  || format('%I', sub.selector);
+  END IF;
+  q := format(E'SELECT to_json(_) AS %I\n'
+               '  FROM (VALUES (%s)) AS _(%s)',
+              col,
+              array_to_string(lookups, ', '),
+              array_to_string(labels, ', '));
+END
+$$ LANGUAGE plpgsql STABLE STRICT;
+
+CREATE FUNCTION to_sql(selector text,
+                       predicate text,
+                       body text,
+                       tab regclass,
+                       other regclass)
+RETURNS text AS $$
+DECLARE
+BEGIN
+END
+$$ LANGUAGE plpgsql STABLE STRICT;
+
+      SELECT fk.*
+        FROM graphql.fk(sub.selector),
+             LATERAL (SELECT num FROM graphql.cols(tab)
+                       WHERE col = fk.cols[1]) AS _
+       WHERE cardinality(fk.cols) = 1 AND fk.tab = to_sql.tab
+       ORDER BY _.num LIMIT 1 INTO fk;
+      IF NOT FOUND THEN
+        RAISE EXCEPTION 'Not able to construct a JOIN for missing column: %',
+                        sub.selector;
+      END IF;
+      --- If:
+      --- * Thare are two and only two foreign keys for the other table, and
+      --- * All the columns of the table participate in one or the other
+      ---   foreign key, then
+      --- * We can treat the table as a JOIN table and follow the keys.
+      --- Otherwise:
+      --- * We use the existence of the foreign key to look up the record in
+      ---   the table that JOINs with us.
+      ---
+      --- Whenever we are looking at a table that REFERENCES us, we assume it
+      --- is a many-to-one relationship; and expect to return an array-valued
+      --- result. However, it should be possible to recognize a one-to-one
+      --- relationship via the presence of a UNIQUE constraint, in which case
+      --- we ought to return a scalar result.
+      IF FALSE THEN
+        subselects := subselects || graphql.to_sql(sub.*, tab);
+        SELECT json_agg(other.*)
+          FROM tab
+          JOIN sub.selector ON (pk) = (fk.cols)
+          JOIN fks[2].tab ON (fk2.cols) = (pk(fks[2].tab));
+        --- Recursion happens in here
+      ELSE
+        subselects := subselects || graphql.to_sql(sub.*, tab, fk.others);
+        --- Recursion happens in here
+        subquery := subquery
+                 || graphql.to_sql(sub.selector, sub.predicate, sub.body);
+      END IF;
 CREATE FUNCTION parse_many(expr text)
 RETURNS TABLE (selector text, predicate text, body text) AS $$
 DECLARE
