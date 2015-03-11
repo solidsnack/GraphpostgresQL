@@ -148,7 +148,7 @@ DECLARE
   subselects text[] = ARRAY[]::text[];
   predicates text[] = ARRAY[]::text[];
 BEGIN
-  body := substr(body, 2, length(body)-2);
+  body := btrim(body, '{}');
   IF predicate IS NOT NULL THEN
     predicates := predicates
                || graphql.format_comparison(tab,
@@ -185,8 +185,6 @@ BEGIN
                                                  sub.predicate,
                                                  sub.body,
                                                  tab);
-      --- TODO: Handle nested lookup into JSON, HStore, RECORD
-      --- TODO: If col REFERENCES something, push lookup down to it
       cols := cols
            || name(format('%I.%I', 'sub/'||cardinality(subselects), col));
     WHEN NOT FOUND THEN             -- It might be a reference to another table
@@ -195,8 +193,9 @@ BEGIN
                                                  sub.body,
                                                  tab);
       cols := cols
-           || name(format('%I.%I', 'sub/'||cardinality(subselects),
-                                   sub.selector));
+           || name(format('%I.%I',
+                          'sub/'||cardinality(subselects),
+                          sub.selector));
     ELSE
       RAISE EXCEPTION 'Not able to interpret this selector: %', sub.selector;
     END CASE;
@@ -214,7 +213,6 @@ BEGIN
     ELSE
       q := 'SELECT json_agg(' || column_expression || ')' || q;
     END IF;
-    RAISE INFO 'Here: %', q;
   END;
   q := q || format(E'\n  FROM %I', tab);
   FOR i IN 1..cardinality(subselects) LOOP
@@ -249,7 +247,8 @@ DECLARE
   lookups text[] = ARRAY[]::text[];
   labels text[] = ARRAY[]::text[];
 BEGIN
-  SELECT col, typ FROM cols(tab) WHERE cols.col = selector INTO col, typ;
+  SELECT cols.col, cols.typ INTO col, typ
+    FROM graphql.cols(tab) WHERE cols.col = selector;
   IF NOT FOUND THEN
     RAISE EXCEPTION 'Did not find column % on table %', col, tab;
   END IF;
@@ -306,9 +305,9 @@ BEGIN
     WHEN NO_DATA_FOUND THEN
       RAISE EXCEPTION 'No REFERENCE to table % from table %', tab, selector;
   END;
-  SELECT * FROM graphql.cols(selector)
-   WHERE cols.col != ANY (SELECT array_agg(cols) FROM graphql.fk(selector))
-     AND cols.typ NOT IN (regtype('timestamp'), regtype('timestamptz'));
+  PERFORM * FROM graphql.cols(selector)
+    WHERE cols.col NOT IN (SELECT unnest(cols) FROM graphql.fk(selector))
+      AND cols.typ NOT IN (regtype('timestamp'), regtype('timestamptz'));
   --- If:
   --- * Thare are two and only two foreign keys for the other table, and
   --- * All the columns of the table participate in one or the other
