@@ -165,8 +165,9 @@ BEGIN
     CASE
     WHEN FOUND AND sub.body IS NULL THEN           -- A simple column reference
       SELECT array_agg(fk) INTO STRICT fks
-        FROM graphql.fk(tab) WHERE cardinality(cols) = 1 AND cols[1] = col;
-      IF FOUND THEN
+        FROM graphql.fk(tab)
+       WHERE cardinality(fk.cols) = 1 AND fk.cols[1] = col;
+      IF cardinality(fks) > 0 THEN
         IF cardinality(fks) > 1 THEN
           RAISE EXCEPTION 'More than one candidate foreign keys for %(%)',
                           tab, col;
@@ -340,7 +341,7 @@ $$ LANGUAGE plpgsql STABLE;
 CREATE FUNCTION parse_many(expr text)
 RETURNS TABLE (selector text, predicate text, body text) AS $$
 DECLARE
-  whitespace text = E' \t\n';
+  whitespace_and_commas text = E'^[ \t\n,]*';
 BEGIN
   --- To parse many expressions:
   --- * Parse one expression.
@@ -348,15 +349,11 @@ BEGIN
   --- * Consume a comma if present.
   --- * Consume whitespace.
   --- * Repeat until the input is empty.
-  expr := ltrim(expr, whitespace);
+  expr := regexp_replace(expr, whitespace_and_commas, '');
   WHILE expr != '' LOOP
     SELECT * FROM graphql.parse_one(expr) INTO selector, predicate, body, expr;
     RETURN NEXT;
-    expr := ltrim(expr, whitespace);
-    IF substr(expr, 1, 1) = ',' THEN
-      expr := substr(expr, 2);
-    END IF;
-    expr := ltrim(expr, whitespace);
+    expr := regexp_replace(expr, whitespace_and_commas, '');
   END LOOP;
 END
 $$ LANGUAGE plpgsql IMMUTABLE STRICT;
@@ -408,7 +405,9 @@ BEGIN
       EXIT WHEN NOT brackety;
     END CASE;
   END LOOP;
-  body := substr(expr, 1, idx);
+  IF brackety THEN
+    body := substr(expr, 1, idx);
+  END IF;
   remainder := substr(expr, idx+1);
 END
 $$ LANGUAGE plpgsql IMMUTABLE STRICT;
