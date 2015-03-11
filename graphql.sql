@@ -138,28 +138,30 @@ $$ LANGUAGE plpgsql STABLE STRICT;
 CREATE FUNCTION to_sql(selector regclass, predicate text, body text)
 RETURNS text AS $$
 DECLARE
-  q text;
+  q text = '';
   tab regclass = selector;                                       -- For clarity
-  cols name[];
+  cols name[] = ARRAY[]::name[];
   col name;
   sub record;
   pk text = NULL;
   fks graphql.fk[];
-  subselects text[];
-  predicates text[];
+  subselects text[] = ARRAY[]::text[];
+  predicates text[] = ARRAY[]::text[];
 BEGIN
   body := substr(body, 2, length(body)-2);
   IF predicate IS NOT NULL THEN
-    predicates := predicates || format_comparison(tab,
-                                                  graphql.pk(tab),
-                                                  jsonb('['||predicate||']'));
+    predicates := predicates
+               || graphql.format_comparison(tab,
+                                            graphql.pk(tab),
+                                            jsonb('['||predicate||']'));
   END IF;
   FOR sub IN SELECT * FROM graphql.parse_many(body) LOOP
     IF sub.predicate IS NOT NULL THEN
       RAISE EXCEPTION 'Unhandled nested selector %(%)',
                       sub.selector, sub.predicate;
     END IF;
-    SELECT col INTO STRICT col FROM cols(tab) WHERE cols.col = sub.selector;
+    SELECT cols.col INTO col
+      FROM graphql.cols(tab) WHERE cols.col = sub.selector;
     CASE
     WHEN FOUND AND sub.body IS NULL THEN           -- A simple column reference
       SELECT array_agg(fk) INTO STRICT fks
@@ -173,18 +175,28 @@ BEGIN
                    || format(E'SELECT to_json(%1$I) AS %4$I FROM %1$I\n'
                               ' WHERE %1$I.%2$I = %3$I.%4$I',
                              fks[1].other, fks[1].refs[1], tab, col);
-        cols := cols || format('%I.%I', 'sub/'||cardinality(subselects), col);
+        cols := cols
+             || name(format('%I.%I', 'sub/'||cardinality(subselects), col));
       ELSE
-        cols := cols || format('%I', col);
+        cols := cols || name(format('%I', col));
       END IF;
     WHEN FOUND AND sub.body IS NOT NULL THEN             -- Index into a column
-      subselects := subselects || graphql.to_sql(sub.*, tab);
+      subselects := subselects || graphql.to_sql(sub.selector,
+                                                 sub.predicate,
+                                                 sub.body,
+                                                 tab);
       --- TODO: Handle nested lookup into JSON, HStore, RECORD
       --- TODO: If col REFERENCES something, push lookup down to it
-      cols := cols || format('%I.%I', 'sub/'||cardinality(subselects), col);
+      cols := cols
+           || name(format('%I.%I', 'sub/'||cardinality(subselects), col));
     WHEN NOT FOUND THEN             -- It might be a reference to another table
-      subselects := subselects || graphql.to_sql(sub.*, tab, sub.selector);
-      cols := cols || format('%I.%I', 'sub/'||cardinality(subselects), col);
+      subselects := subselects || graphql.to_sql(regclass(sub.selector),
+                                                 sub.predicate,
+                                                 sub.body,
+                                                 tab);
+      cols := cols
+           || name(format('%I.%I', 'sub/'||cardinality(subselects),
+                                   sub.selector));
     ELSE
       RAISE EXCEPTION 'Not able to interpret this selector: %', sub.selector;
     END CASE;
@@ -192,7 +204,7 @@ BEGIN
   DECLARE
     column_expression text;
   BEGIN
-    IF cols > ARRAY[]::text[] THEN
+    IF cols > ARRAY[]::name[] THEN
       column_expression := array_to_string(cols, ', ');
     ELSE
       column_expression := format('%I', tab);
@@ -202,9 +214,10 @@ BEGIN
     ELSE
       q := 'SELECT json_agg(' || column_expression || ')' || q;
     END IF;
+    RAISE INFO 'Here: %', q;
   END;
   q := q || format(E'\n  FROM %I', tab);
-  FOR n IN 1..cardinality(subselects) LOOP
+  FOR i IN 1..cardinality(subselects) LOOP
     q := q || array_to_string(ARRAY[
                 ',',
                 graphql.indent(7, 'LATERAL ('), -- 7 to line up with SELECT ...
@@ -214,8 +227,8 @@ BEGIN
     --- TODO: Find an "indented text" abstraction so we don't split and
     ---       recombine the same lines so many times.
   END LOOP;
-  FOR n IN 1..cardinality(predicates) LOOP
-    IF n = 1 THEN
+  FOR i IN 1..cardinality(predicates) LOOP
+    IF i = 1 THEN
       q := q || E'\n WHERE (' || predicates[i] || ')';
     ELSE
       q := q || E'\n   AND (' || predicates[i] || ')';
@@ -223,18 +236,18 @@ BEGIN
   END LOOP;
   RETURN q;
 END
-$$ LANGUAGE plpgsql STABLE STRICT;
+$$ LANGUAGE plpgsql STABLE;
 
 --- Handling fancy columns: json, jsonb and hstore
 CREATE FUNCTION to_sql(selector text, predicate text, body text, tab regclass)
 RETURNS text AS $$
 DECLARE
-  q text;
+  q text = '';
   col name;
   typ regtype;
   sub record;
-  lookups text[];
-  labels text[];
+  lookups text[] = ARRAY[]::text[];
+  labels text[] = ARRAY[]::text[];
 BEGIN
   SELECT col, typ FROM cols(tab) WHERE cols.col = selector INTO col, typ;
   IF NOT FOUND THEN
@@ -269,7 +282,7 @@ BEGIN
               array_to_string(labels, ', '));
   RETURN q;
 END
-$$ LANGUAGE plpgsql STABLE STRICT;
+$$ LANGUAGE plpgsql STABLE;
 
 --- For tables with foreign keys that point at the target table. Mutually
 --- recursive with the base case.
@@ -279,13 +292,12 @@ CREATE FUNCTION to_sql(selector regclass,
                        tab regclass)
 RETURNS text AS $$
 DECLARE
-  q text;
+  q text = '';
   ikey record;                    -- Key which REFERENCEs `tab` from `selector`
   --- If `selector` is a JOIN table, then `okey` is used to store a REFERENCE
   --- to the table with the actual data.
   okey record;
   fks graphql.fk[];               -- Reuses the type defined by the VIEW, below
-  fk graphql.fk;
 BEGIN
   BEGIN
     SELECT * INTO STRICT ikey     -- Find the first foreign key in column order
@@ -314,15 +326,17 @@ BEGIN
     q := graphql.to_sql(selector, NULL, body);
     fks := fks || (selector, ikey.cols, tab, ikey.refs)::graphql.fk;
   END IF;
-  FOREACH fk IN ARRAY fks LOOP
+  FOR i IN 1..cardinality(fks) LOOP
     --- Because there is no predicate, `q` will not have a WHERE clause; so we
     --- can concatenate the JOINs to it.
-    q := q || E'\n  '
-           || graphql.format_join(fk.tab, fk.cols, fk.other, fk.refs);
+    q := q || E'\n  ' || graphql.format_join(fks[i].tab,
+                                             fks[i].cols,
+                                             fks[i].other,
+                                             fks[i].refs);
   END LOOP;
   RETURN q;
 END
-$$ LANGUAGE plpgsql STABLE STRICT;
+$$ LANGUAGE plpgsql STABLE;
 
 CREATE FUNCTION parse_many(expr text)
 RETURNS TABLE (selector text, predicate text, body text) AS $$
