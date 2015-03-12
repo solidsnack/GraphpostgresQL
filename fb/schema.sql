@@ -1,9 +1,12 @@
+BEGIN;
+
+DROP SCHEMA IF EXISTS fb CASCADE;
 CREATE SCHEMA fb;
 SET search_path TO fb,"$user",public;
 CREATE EXTENSION "uuid-ossp";
 
 
-CREATE TABLE "user" (
+CREATE TABLE consumer (
   id            uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   created       timestamptz NOT NULL DEFAULT now(),
   full_name     text NOT NULL DEFAULT ''
@@ -14,13 +17,13 @@ CREATE TABLE post (
   id            uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   created       timestamptz NOT NULL DEFAULT now(),
   content       text NOT NULL DEFAULT '',
-  "user"        uuid REFERENCES "user" NOT NULL
+  consumer        uuid REFERENCES consumer NOT NULL
 );
 
 
 CREATE TABLE friendship (
-  first         uuid REFERENCES "user" NOT NULL,
-  second        uuid REFERENCES "user" NOT NULL,
+  first         uuid REFERENCES consumer NOT NULL,
+  second        uuid REFERENCES consumer NOT NULL,
   created       timestamptz NOT NULL DEFAULT now(),
   UNIQUE (first, second)
 );
@@ -44,3 +47,5 @@ AFTER INSERT ON friendship
 DEFERRABLE INITIALLY DEFERRED
 FOR EACH ROW
 EXECUTE PROCEDURE check_friendship_symmetry();
+
+END;
