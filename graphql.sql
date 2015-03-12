@@ -143,7 +143,7 @@ RETURNS text AS $$
 DECLARE
   q text = '';
   tab regclass = selector;                                       -- For clarity
-  cols name[] = ARRAY[]::name[];
+  cols text[] = ARRAY[]::text[];
   col name;
   sub record;
   pk text = NULL;
@@ -179,27 +179,25 @@ BEGIN
                    || format(E'SELECT to_json(%1$I) AS %4$I FROM %1$I\n'
                               ' WHERE %1$I.%2$I = %3$I.%4$I',
                              fks[1].other, fks[1].refs[1], tab, col);
-        cols := cols
-             || name(format('%I.%I', 'sub/'||cardinality(subselects), col));
+        cols := cols || format('%I.%I', 'sub/'||cardinality(subselects), col);
       ELSE
-        cols := cols || name(format('%I', col));
+        cols := cols || format('%I', col);
       END IF;
     WHEN FOUND AND sub.body IS NOT NULL THEN             -- Index into a column
       subselects := subselects || graphql.to_sql(sub.selector,
                                                  sub.predicate,
                                                  sub.body,
                                                  tab);
-      cols := cols
-           || name(format('%I.%I', 'sub/'||cardinality(subselects), col));
+      cols := cols || format('%I.%I', 'sub/'||cardinality(subselects), col);
     WHEN NOT FOUND THEN             -- It might be a reference to another table
       subselects := subselects || graphql.to_sql(regclass(sub.selector),
                                                  sub.predicate,
                                                  sub.body,
                                                  tab);
       cols := cols
-           || name(format('%I.%I',
-                          'sub/'||cardinality(subselects),
-                          sub.selector));
+           || format('%I.%I',
+                     'sub/'||cardinality(subselects),
+                     sub.selector);
     ELSE
       RAISE EXCEPTION 'Not able to interpret this selector: %', sub.selector;
     END CASE;
@@ -207,8 +205,16 @@ BEGIN
   DECLARE
     column_expression text;
   BEGIN
-    IF cols > ARRAY[]::name[] THEN
-      column_expression := array_to_string(cols, ', ');
+    IF cols > ARRAY[]::text[] THEN
+      --- We want a temporary record type to to pass to json_agg or to_json as
+      --- a single parameter so that column names are preserved. So we select
+      --- all the columns into a subselect with LATERAL and then reference the
+      --- subselect. This subselect should always be the last one in the
+      --- sequence, since it needs to reference "columns" created in the other
+      --- subselects.
+      subselects := subselects
+                 || format('SELECT %s', array_to_string(cols, ', '));
+      column_expression := format('%I', 'sub/'||cardinality(subselects));
     ELSE
       column_expression := format('%I', tab);
     END IF;
