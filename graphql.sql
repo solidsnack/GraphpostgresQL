@@ -135,7 +135,10 @@ END
 $$ LANGUAGE plpgsql STABLE STRICT;
 
 --- Base case (and entry point): looking up a row from a table.
-CREATE FUNCTION to_sql(selector regclass, predicate text, body text)
+CREATE FUNCTION to_sql(selector regclass,
+                       predicate text,
+                       body text,
+                       label name DEFAULT NULL)
 RETURNS text AS $$
 DECLARE
   q text = '';
@@ -214,6 +217,7 @@ BEGIN
     ELSE
       q := 'SELECT json_agg(' || column_expression || ')' || q;
     END IF;
+    q := q || format(' AS %I', COALESCE(label, name(tab)));
   END;
   q := q || format(E'\n  FROM %I', tab);
   FOR i IN 1..cardinality(subselects) LOOP
@@ -297,7 +301,6 @@ DECLARE
   --- If `selector` is a JOIN table, then `okey` is used to store a REFERENCE
   --- to the table with the actual data.
   okey record;
-  fks graphql.fk[];               -- Reuses the type defined by the VIEW, below
 BEGIN
   BEGIN
     SELECT * INTO STRICT ikey     -- Find the first foreign key in column order
@@ -319,21 +322,19 @@ BEGIN
   ---   the table that JOINs with us.
   IF NOT FOUND AND (SELECT count(1) FROM graphql.fk(selector)) = 2 THEN
     SELECT * INTO STRICT okey FROM graphql.fk(selector) WHERE fk != ikey;
-    q := graphql.to_sql(okey.other, NULL, body);
-    fks := fks || (okey.other, okey.refs, selector, okey.cols)::graphql.fk;
-    fks := fks || (selector, ikey.cols, tab, ikey.refs)::graphql.fk;
+    q := graphql.to_sql(okey.other, NULL, body, name(selector))
+      || E'\n  ' || graphql.format_join_table_lookup(tab,
+                                                     ikey.refs,
+                                                     ikey.cols,
+                                                     selector,
+                                                     okey.cols,
+                                                     okey.refs,
+                                                     okey.other);
   ELSE
-    q := graphql.to_sql(selector, NULL, body);
-    fks := fks || (selector, ikey.cols, tab, ikey.refs)::graphql.fk;
+    q := graphql.to_sql(selector, NULL, body, name(selector))
+      || E'\n  '
+      || graphql.format_join(selector, ikey.cols, tab, ikey.refs, 'join/1');
   END IF;
-  FOR i IN 1..cardinality(fks) LOOP
-    --- Because there is no predicate, `q` will not have a WHERE clause; so we
-    --- can concatenate the JOINs to it.
-    q := q || E'\n  ' || graphql.format_join(fks[i].tab,
-                                             fks[i].cols,
-                                             fks[i].other,
-                                             fks[i].refs);
-  END LOOP;
   RETURN q;
 END
 $$ LANGUAGE plpgsql STABLE;
@@ -439,6 +440,33 @@ RETURNS text AS $$
                 array_to_string((SELECT array_agg(col) FROM ys), ', '))
 $$ LANGUAGE sql STABLE STRICT;
 
+CREATE FUNCTION format_comparison(x name, xs name[], y regclass, ys name[])
+RETURNS text AS $$
+  WITH xs(col) AS (SELECT format('%I.%I', x, col) FROM unnest(xs) AS _(col)),
+       ys(col) AS (SELECT format('%I.%I', y, col) FROM unnest(ys) AS _(col))
+  SELECT format('(%s) = (%s)',
+                array_to_string((SELECT array_agg(col) FROM xs), ', '),
+                array_to_string((SELECT array_agg(col) FROM ys), ', '))
+$$ LANGUAGE sql STABLE STRICT;
+
+CREATE FUNCTION format_comparison(x regclass, xs name[], y name, ys name[])
+RETURNS text AS $$
+  WITH xs(col) AS (SELECT format('%I.%I', x, col) FROM unnest(xs) AS _(col)),
+       ys(col) AS (SELECT format('%I.%I', y, col) FROM unnest(ys) AS _(col))
+  SELECT format('(%s) = (%s)',
+                array_to_string((SELECT array_agg(col) FROM xs), ', '),
+                array_to_string((SELECT array_agg(col) FROM ys), ', '))
+$$ LANGUAGE sql STABLE STRICT;
+
+CREATE FUNCTION format_comparison(x name, xs name[], y name, ys name[])
+RETURNS text AS $$
+  WITH xs(col) AS (SELECT format('%I.%I', x, col) FROM unnest(xs) AS _(col)),
+       ys(col) AS (SELECT format('%I.%I', y, col) FROM unnest(ys) AS _(col))
+  SELECT format('(%s) = (%s)',
+                array_to_string((SELECT array_agg(col) FROM xs), ', '),
+                array_to_string((SELECT array_agg(col) FROM ys), ', '))
+$$ LANGUAGE sql STABLE STRICT;
+
 CREATE FUNCTION format_comparison(x regclass, xs name[], ys jsonb)
 RETURNS text AS $$
   WITH xs(col) AS (SELECT format('%I.%I', x, col) FROM unnest(xs) AS _(col)),
@@ -451,14 +479,61 @@ RETURNS text AS $$
                 array_to_string((SELECT array_agg(val) FROM casted), ', '))
 $$ LANGUAGE sql STABLE STRICT;
 
+CREATE FUNCTION format_join(tab name,     -- When tab is an alias given with AS
+                            cols name[],
+                            other regclass,
+                            refs name[],
+                            label name DEFAULT NULL)
+RETURNS text AS $$
+  SELECT CASE WHEN label IS NULL THEN
+           format('JOIN %I ON (%s)',
+                  other,
+                  graphql.format_comparison(tab, cols, other, refs))
+         ELSE
+           format('JOIN %I AS %I ON (%s)',
+                  other,
+                  label,
+                  graphql.format_comparison(tab, cols, label, refs))
+         END
+$$ LANGUAGE sql STABLE STRICT;
+
 CREATE FUNCTION format_join(tab regclass,
                             cols name[],
                             other regclass,
-                            refs name[])
+                            refs name[],
+                            label name DEFAULT NULL)
 RETURNS text AS $$
-  SELECT format('JOIN %I ON (%s)',
-                other,
-                graphql.format_comparison(tab, cols, other, refs))
+  SELECT CASE WHEN label IS NULL THEN
+           format('JOIN %I ON (%s)',
+                  other,
+                  graphql.format_comparison(tab, cols, other, refs))
+         ELSE
+           format('JOIN %I AS %I ON (%s)',
+                  other,
+                  label,
+                  graphql.format_comparison(tab, cols, label, refs))
+         END
 $$ LANGUAGE sql STABLE STRICT;
 
-COMMIT;
+CREATE FUNCTION format_join_table_lookup(main_table regclass,
+                                         main_refs name[],
+                                         main_cols name[],
+                                         join_table regclass,
+                                         data_cols name[],
+                                         data_refs name[],
+                                         data_table regclass)
+RETURNS text AS $$
+  SELECT graphql.format_join(data_table,
+                             data_refs,
+                             join_table,
+                             data_cols,
+                             'join/1')
+      || E'\n  '
+      || graphql.format_join('join/1',
+                             main_cols,
+                             main_table,
+                             main_refs,
+                             'join/2')
+$$ LANGUAGE sql STABLE STRICT;
+
+END;
