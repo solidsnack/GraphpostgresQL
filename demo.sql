@@ -1,27 +1,31 @@
+\set QUIET true
+\set ON_ERROR_ROLLBACK 1
+\set ON_ERROR_STOP true
+
 \include_relative graphql.sql
 \include_relative fb/schema.sql
 \include_relative fb/data.sql
 
 \x auto
 
-\C Consumers:
-SELECT * FROM consumer;
+\C Users:
+SELECT * FROM "user";
 
 \C Friendships:
 SELECT friendship.*, l._||' -> '||r._ AS who FROM friendship,
-         LATERAL (SELECT full_name FROM consumer WHERE first = id) AS l(_),
-         LATERAL (SELECT full_name FROM consumer WHERE second = id) AS r(_);
+         LATERAL (SELECT full_name FROM "user" WHERE first = id) AS l(_),
+         LATERAL (SELECT full_name FROM "user" WHERE second = id) AS r(_);
 
 DO $$
 DECLARE
---graphql_q text = E'consumer("f3411edc-e1d0-452a-bc19-b42c0d5a0e36") {\n'
---                  '  full_name,\n'
---                  '  friendship\n'
---                  '}';
-  graphql_q text = E'consumer("f3411edc-e1d0-452a-bc19-b42c0d5a0e36") {\n'
+  graphql_q text = E'user("f3411edc-e1d0-452a-bc19-b42c0d5a0e36") {\n'
                     '  full_name,\n'
-                    '  friendship { full_name }\n'
+                    '  friendship\n'
                     '}';
+--graphql_q text = E'user("f3411edc-e1d0-452a-bc19-b42c0d5a0e36") {\n'
+--                  '  full_name,\n'
+--                  '  friendship { full_name }\n'
+--                  '}';
   sql_q text;
   result json;
   msg text;

@@ -176,12 +176,12 @@ BEGIN
                           tab, col;
         END IF;
         subselects := subselects
-                   || format(E'SELECT to_json(%1$I) AS %4$I FROM %1$I\n'
-                              ' WHERE %1$I.%2$I = %3$I.%4$I',
+                   || format(E'SELECT to_json(%1$s) AS %4$I FROM %1$s\n'
+                              ' WHERE %1$s.%2$I = %3$s.%4$I',
                              fks[1].other, fks[1].refs[1], tab, col);
         cols := cols || format('%I.%I', 'sub/'||cardinality(subselects), col);
       ELSE
-        cols := cols || format('%I.%I', tab, col);
+        cols := cols || format('%s.%I', tab, col);
       END IF;
     WHEN FOUND AND sub.body IS NOT NULL THEN             -- Index into a column
       subselects := subselects || graphql.to_sql(sub.selector,
@@ -215,16 +215,20 @@ BEGIN
                  || format('SELECT %s', array_to_string(cols, ', '));
       column_expression := format('%I', 'sub/'||cardinality(subselects));
     ELSE
-      column_expression := format('%I', tab);
+      column_expression := format('%s', tab);
     END IF;
     IF pk IS NOT NULL THEN                             -- Implies single result
       q := 'SELECT to_json('  || column_expression || ')' || q;
     ELSE
       q := 'SELECT json_agg(' || column_expression || ')' || q;
     END IF;
-    q := q || format(' AS %I', COALESCE(label, name(tab)));
+    IF label IS NOT NULL THEN
+      q := q || format(' AS %I', label);
+    ELSE
+      q := q || format(' AS %s', tab);
+    END IF;
   END;
-  q := q || format(E'\n  FROM %I', tab);
+  q := q || format(E'\n  FROM %s', tab);
   FOR i IN 1..cardinality(subselects) LOOP
     q := q || array_to_string(ARRAY[
                 ',',
@@ -447,8 +451,8 @@ $$ LANGUAGE sql IMMUTABLE STRICT;
 
 CREATE FUNCTION format_comparison(x regclass, xs name[], y regclass, ys name[])
 RETURNS text AS $$
-  WITH xs(col) AS (SELECT format('%I.%I', x, col) FROM unnest(xs) AS _(col)),
-       ys(col) AS (SELECT format('%I.%I', y, col) FROM unnest(ys) AS _(col))
+  WITH xs(col) AS (SELECT format('%s.%I', x, col) FROM unnest(xs) AS _(col)),
+       ys(col) AS (SELECT format('%s.%I', y, col) FROM unnest(ys) AS _(col))
   SELECT format('(%s) = (%s)',
                 array_to_string((SELECT array_agg(col) FROM xs), ', '),
                 array_to_string((SELECT array_agg(col) FROM ys), ', '))
@@ -457,7 +461,7 @@ $$ LANGUAGE sql STABLE STRICT;
 CREATE FUNCTION format_comparison(x name, xs name[], y regclass, ys name[])
 RETURNS text AS $$
   WITH xs(col) AS (SELECT format('%I.%I', x, col) FROM unnest(xs) AS _(col)),
-       ys(col) AS (SELECT format('%I.%I', y, col) FROM unnest(ys) AS _(col))
+       ys(col) AS (SELECT format('%s.%I', y, col) FROM unnest(ys) AS _(col))
   SELECT format('(%s) = (%s)',
                 array_to_string((SELECT array_agg(col) FROM xs), ', '),
                 array_to_string((SELECT array_agg(col) FROM ys), ', '))
@@ -465,7 +469,7 @@ $$ LANGUAGE sql STABLE STRICT;
 
 CREATE FUNCTION format_comparison(x regclass, xs name[], y name, ys name[])
 RETURNS text AS $$
-  WITH xs(col) AS (SELECT format('%I.%I', x, col) FROM unnest(xs) AS _(col)),
+  WITH xs(col) AS (SELECT format('%s.%I', x, col) FROM unnest(xs) AS _(col)),
        ys(col) AS (SELECT format('%I.%I', y, col) FROM unnest(ys) AS _(col))
   SELECT format('(%s) = (%s)',
                 array_to_string((SELECT array_agg(col) FROM xs), ', '),
@@ -483,7 +487,7 @@ $$ LANGUAGE sql STABLE STRICT;
 
 CREATE FUNCTION format_comparison(x regclass, xs name[], ys text[])
 RETURNS text AS $$
-  WITH xs(col) AS (SELECT format('%I.%I', x, col) FROM unnest(xs) AS _(col)),
+  WITH xs(col) AS (SELECT format('%s.%I', x, col) FROM unnest(xs) AS _(col)),
        named(col, txt) AS (SELECT * FROM unnest(xs, ys)),
        casted(val) AS (SELECT format('%L::%I', txt, typ)
                          FROM named JOIN graphql.cols(x) USING (col))
@@ -499,11 +503,11 @@ CREATE FUNCTION format_join(tab regclass,
                             label name DEFAULT NULL)
 RETURNS text AS $$
   SELECT CASE WHEN label IS NULL THEN
-           format('JOIN %I ON (%s)',
+           format('JOIN %s ON (%s)',
                   other,
                   graphql.format_comparison(tab, cols, other, refs))
          ELSE
-           format('JOIN %I AS %I ON (%s)',
+           format('JOIN %s AS %I ON (%s)',
                   other,
                   label,
                   graphql.format_comparison(tab, cols, label, refs))

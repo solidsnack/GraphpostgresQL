@@ -6,7 +6,7 @@ SET search_path TO fb,"$user",public;
 CREATE EXTENSION "uuid-ossp";
 
 
-CREATE TABLE consumer (
+CREATE TABLE "user" (
   id            uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   created       timestamptz NOT NULL DEFAULT now(),
   full_name     text NOT NULL DEFAULT ''
@@ -17,13 +17,13 @@ CREATE TABLE post (
   id            uuid PRIMARY KEY DEFAULT uuid_generate_v4(),
   created       timestamptz NOT NULL DEFAULT now(),
   content       text NOT NULL DEFAULT '',
-  consumer        uuid REFERENCES consumer NOT NULL
+  "user"        uuid REFERENCES "user" NOT NULL
 );
 
 
 CREATE TABLE friendship (
-  first         uuid REFERENCES consumer NOT NULL,
-  second        uuid REFERENCES consumer NOT NULL,
+  first         uuid REFERENCES "user" NOT NULL,
+  second        uuid REFERENCES "user" NOT NULL,
   created       timestamptz NOT NULL DEFAULT now(),
   UNIQUE (first, second)
 );
