@@ -126,6 +126,22 @@ $$ LANGUAGE sql STABLE STRICT;
 
  /* * * * * * * * * * * * * * * Begin main program * * * * * * * * * * * * * */
 
+CREATE FUNCTION run(expr text)
+RETURNS json AS $$
+DECLARE
+  intermediate json;
+  result json[] = ARRAY[]::json[];
+  q text;
+BEGIN
+  FOR q IN SELECT graphql.to_sql(expr) LOOP
+    EXECUTE q INTO intermediate;
+    CONTINUE WHEN NOT FOUND;
+    result := result || intermediate;
+  END LOOP;
+  RETURN to_json(result);
+END
+$$ LANGUAGE plpgsql STABLE STRICT;
+
 CREATE FUNCTION to_sql(expr text)
 RETURNS TABLE (query text) AS $$
 BEGIN
