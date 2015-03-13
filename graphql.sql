@@ -146,17 +146,17 @@ DECLARE
   cols text[] = ARRAY[]::text[];
   col name;
   sub record;
-  pk text = NULL;
+  pk text[] = NULL;
   fks graphql.fk[];
   subselects text[] = ARRAY[]::text[];
   predicates text[] = ARRAY[]::text[];
 BEGIN
   body := btrim(body, '{}');
   IF predicate IS NOT NULL THEN
+    SELECT array_agg(_) INTO STRICT pk
+      FROM jsonb_array_elements_text(jsonb('['||predicate||']')) AS __(_);
     predicates := predicates
-               || graphql.format_comparison(tab,
-                                            graphql.pk(tab),
-                                            jsonb('['||predicate||']'));
+               || graphql.format_comparison(tab, graphql.pk(tab), pk);
   END IF;
   FOR sub IN SELECT * FROM graphql.parse_many(body) LOOP
     IF sub.predicate IS NOT NULL THEN
@@ -473,11 +473,10 @@ RETURNS text AS $$
                 array_to_string((SELECT array_agg(col) FROM ys), ', '))
 $$ LANGUAGE sql STABLE STRICT;
 
-CREATE FUNCTION format_comparison(x regclass, xs name[], ys jsonb)
+CREATE FUNCTION format_comparison(x regclass, xs name[], ys text[])
 RETURNS text AS $$
   WITH xs(col) AS (SELECT format('%I.%I', x, col) FROM unnest(xs) AS _(col)),
-       named(col, txt) AS
-        (SELECT * FROM ROWS FROM (unnest(xs), jsonb_array_elements_text(ys))),
+       named(col, txt) AS (SELECT * FROM unnest(xs, ys)),
        casted(val) AS (SELECT format('%L::%I', txt, typ)
                          FROM named JOIN graphql.cols(x) USING (col))
   SELECT format('(%s) = (%s)',
