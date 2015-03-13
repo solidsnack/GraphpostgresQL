@@ -181,7 +181,7 @@ BEGIN
                              fks[1].other, fks[1].refs[1], tab, col);
         cols := cols || format('%I.%I', 'sub/'||cardinality(subselects), col);
       ELSE
-        cols := cols || format('%I', col);
+        cols := cols || format('%I.%I', tab, col);
       END IF;
     WHEN FOUND AND sub.body IS NOT NULL THEN             -- Index into a column
       subselects := subselects || graphql.to_sql(sub.selector,
@@ -303,6 +303,7 @@ CREATE FUNCTION to_sql(selector regclass,
 RETURNS text AS $$
 DECLARE
   q text = '';
+  txts text[];
   ikey record;                    -- Key which REFERENCEs `tab` from `selector`
   --- If `selector` is a JOIN table, then `okey` is used to store a REFERENCE
   --- to the table with the actual data.
@@ -328,9 +329,21 @@ BEGIN
   ---   the table that JOINs with us.
   IF NOT FOUND AND (SELECT count(1) FROM graphql.fk(selector)) = 2 THEN
     SELECT * INTO STRICT okey FROM graphql.fk(selector) WHERE fk != ikey;
-    q := graphql.to_sql(okey.other, NULL, body, name(selector))
-      || E'\n  '
-      || graphql.format_join(okey.other, okey.refs, selector, okey.cols);
+    q := graphql.to_sql(okey.other, NULL, body, name(selector));
+    --- Split at the first LATERAL and put the JOIN behind it, if there is a
+    --- LATERAL.
+    SELECT regexp_matches(q, '^(.+)(,[ \n\t]+LATERAL)(.+)$') INTO txts;
+    IF FOUND THEN
+      q := txts[1]
+        || E'\n  '
+        || graphql.format_join(okey.other, okey.refs, selector, okey.cols)
+        || txts[2]
+        || txts[3];
+    ELSE
+      q := q
+        || E'\n  '
+        || graphql.format_join(okey.other, okey.refs, selector, okey.cols);
+    END IF;
   ELSE
     q := graphql.to_sql(selector, NULL, body, name(selector));
   END IF;
