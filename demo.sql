@@ -14,10 +14,14 @@ SELECT friendship.*, l._||' -> '||r._ AS who FROM friendship,
 
 DO $$
 DECLARE
-  graphql_q text = 'consumer("f3411edc-e1d0-452a-bc19-b42c0d5a0e36") {'
-                   '  full_name,'
-                   '  friendship'
-                   '}';
+--graphql_q text = E'consumer("f3411edc-e1d0-452a-bc19-b42c0d5a0e36") {\n'
+--                  '  full_name,\n'
+--                  '  friendship\n'
+--                  '}';
+  graphql_q text = E'consumer("f3411edc-e1d0-452a-bc19-b42c0d5a0e36") {\n'
+                    '  full_name,\n'
+                    '  friendship { full_name }\n'
+                    '}';
   sql_q text;
   result json;
   msg text;
