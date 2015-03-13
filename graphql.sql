@@ -193,11 +193,10 @@ BEGIN
       subselects := subselects || graphql.to_sql(regclass(sub.selector),
                                                  sub.predicate,
                                                  sub.body,
-                                                 tab);
+                                                 tab,
+                                                 pk);
       cols := cols
-           || format('%I.%I',
-                     'sub/'||cardinality(subselects),
-                     sub.selector);
+           || format('%I.%I', 'sub/'||cardinality(subselects), sub.selector);
     ELSE
       RAISE EXCEPTION 'Not able to interpret this selector: %', sub.selector;
     END CASE;
@@ -299,7 +298,8 @@ $$ LANGUAGE plpgsql STABLE;
 CREATE FUNCTION to_sql(selector regclass,
                        predicate text,
                        body text,
-                       tab regclass)
+                       tab regclass,
+                       keys text[])
 RETURNS text AS $$
 DECLARE
   q text = '';
@@ -329,18 +329,13 @@ BEGIN
   IF NOT FOUND AND (SELECT count(1) FROM graphql.fk(selector)) = 2 THEN
     SELECT * INTO STRICT okey FROM graphql.fk(selector) WHERE fk != ikey;
     q := graphql.to_sql(okey.other, NULL, body, name(selector))
-      || E'\n  ' || graphql.format_join_table_lookup(tab,
-                                                     ikey.refs,
-                                                     ikey.cols,
-                                                     selector,
-                                                     okey.cols,
-                                                     okey.refs,
-                                                     okey.other);
-  ELSE
-    q := graphql.to_sql(selector, NULL, body, name(selector))
       || E'\n  '
-      || graphql.format_join(selector, ikey.cols, tab, ikey.refs, 'join/1');
+      || graphql.format_join(okey.other, okey.refs, selector, okey.cols);
+  ELSE
+    q := graphql.to_sql(selector, NULL, body, name(selector));
   END IF;
+  q := q || E'\n WHERE '
+         || graphql.format_comparison(selector, ikey.cols, keys);
   RETURN q;
 END
 $$ LANGUAGE plpgsql STABLE;
@@ -484,24 +479,6 @@ RETURNS text AS $$
                 array_to_string((SELECT array_agg(val) FROM casted), ', '))
 $$ LANGUAGE sql STABLE STRICT;
 
-CREATE FUNCTION format_join(tab name,     -- When tab is an alias given with AS
-                            cols name[],
-                            other regclass,
-                            refs name[],
-                            label name DEFAULT NULL)
-RETURNS text AS $$
-  SELECT CASE WHEN label IS NULL THEN
-           format('JOIN %I ON (%s)',
-                  other,
-                  graphql.format_comparison(tab, cols, other, refs))
-         ELSE
-           format('JOIN %I AS %I ON (%s)',
-                  other,
-                  label,
-                  graphql.format_comparison(tab, cols, label, refs))
-         END
-$$ LANGUAGE sql STABLE STRICT;
-
 CREATE FUNCTION format_join(tab regclass,
                             cols name[],
                             other regclass,
@@ -518,27 +495,6 @@ RETURNS text AS $$
                   label,
                   graphql.format_comparison(tab, cols, label, refs))
          END
-$$ LANGUAGE sql STABLE STRICT;
-
-CREATE FUNCTION format_join_table_lookup(main_table regclass,
-                                         main_refs name[],
-                                         main_cols name[],
-                                         join_table regclass,
-                                         data_cols name[],
-                                         data_refs name[],
-                                         data_table regclass)
-RETURNS text AS $$
-  SELECT graphql.format_join(data_table,
-                             data_refs,
-                             join_table,
-                             data_cols,
-                             'join/1')
-      || E'\n  '
-      || graphql.format_join('join/1',
-                             main_cols,
-                             main_table,
-                             main_refs,
-                             'join/2')
-$$ LANGUAGE sql STABLE STRICT;
+$$ LANGUAGE sql STABLE;
 
 END;
