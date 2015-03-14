@@ -110,17 +110,17 @@ CREATE FUNCTION ns(tab regclass) RETURNS name AS $$
 $$ LANGUAGE sql STABLE STRICT;
 
 CREATE FUNCTION pk(t regclass) RETURNS name[] AS $$
-  SELECT cols FROM meta.pk WHERE meta.pk.tab = t;
+  SELECT cols FROM graphql.pk WHERE graphql.pk.tab = t;
 $$ LANGUAGE sql STABLE STRICT;
 
 CREATE FUNCTION cols(t regclass)
 RETURNS TABLE (num smallint, col name, typ regtype) AS $$
-  SELECT num, col, typ FROM meta.cols WHERE meta.cols.tab = t;
+  SELECT num, col, typ FROM graphql.cols WHERE graphql.cols.tab = t;
 $$ LANGUAGE sql STABLE STRICT;
 
 CREATE FUNCTION fk(t regclass)
 RETURNS TABLE (cols name[], other regclass, refs name[]) AS $$
-  SELECT cols, other, refs FROM meta.fk WHERE meta.fk.tab = t;
+  SELECT cols, other, refs FROM graphql.fk WHERE graphql.fk.tab = t;
 $$ LANGUAGE sql STABLE STRICT;
 
 
