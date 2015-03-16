@@ -33,7 +33,7 @@ BEGIN
   RAISE INFO E'GraphQL to parse:\n%\n', graphql_q;
   SELECT * INTO STRICT sql_q FROM graphql.to_sql(graphql_q);
   RAISE INFO E'SQL that will be run:\n%\n', sql_q;
-  EXECUTE sql_q INTO STRICT result;
+  result := graphql.run(graphql_q);
   RAISE INFO E'Result:\n%\n', result;
 END
 $$;

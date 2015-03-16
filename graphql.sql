@@ -131,14 +131,26 @@ RETURNS json AS $$
 DECLARE
   intermediate json;
   result json[] = ARRAY[]::json[];
+  n integer = 0;
   q text;
 BEGIN
   FOR q IN SELECT graphql.to_sql(expr) LOOP
-    EXECUTE q INTO intermediate;
-    CONTINUE WHEN NOT FOUND;
+    n := n + 1;
+    BEGIN
+      EXECUTE q INTO STRICT intermediate;
+    EXCEPTION
+      WHEN NO_DATA_FOUND THEN CONTINUE;
+    END;
     result := result || intermediate;
   END LOOP;
-  RETURN to_json(result);
+  --- Maybe there is a better way to approach query cardinality? For example,
+  --- by insisting that there be a root query (perhaps with no predicate?) or
+  --- returning TABLE (result json).
+  IF n = 1 THEN
+    RETURN result[1];
+  ELSE
+    RETURN to_json(result);
+  END IF;
 END
 $$ LANGUAGE plpgsql STABLE STRICT;
 
