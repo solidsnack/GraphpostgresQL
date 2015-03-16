@@ -505,7 +505,7 @@ CREATE FUNCTION format_comparison(x regclass, xs name[], ys text[])
 RETURNS text AS $$
   WITH xs(col) AS (SELECT format('%s.%I', x, col) FROM unnest(xs) AS _(col)),
        named(col, txt) AS (SELECT * FROM unnest(xs, ys)),
-       casted(val) AS (SELECT format('%L::%I', txt, typ)
+       casted(val) AS (SELECT format('CAST(%L AS %s)', txt, typ)
                          FROM named JOIN graphql.cols(x) USING (col))
   SELECT format('(%s) = (%s)',
                 array_to_string((SELECT array_agg(col) FROM xs), ', '),
