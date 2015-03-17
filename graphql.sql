@@ -305,15 +305,18 @@ BEGIN
       IF sub.body IS NOT NULL THEN                 -- TODO: Nested JSON lookups
         RAISE EXCEPTION 'Nested JSON lookup is as yet unimplemented';
       END IF;
+      lookups := lookups || format('->%L', sub.selector);
     WHEN regtype('hstore') THEN
       IF sub.body IS NOT NULL THEN
         RAISE EXCEPTION 'No fields below this level (column % is hstore)',
                         tab, col;
       END IF;
+      lookups := lookups || format('->%L', sub.selector);
     ELSE
-      RAISE EXCEPTION 'Unhandled nested type %s for %s.%s', typ, tab, col;
+      --- Treat it as a field lookup in a nested record (this could also end up
+      --- being a function call, by the way).
+      lookups := lookups || format('.%I', sub.selector);
     END CASE;
-    lookups := lookups || format('->%L', sub.selector);
     labels  := labels  || format('%I', sub.selector);
   END LOOP;
   q := format(E'SELECT to_json(_) AS %I\n'
