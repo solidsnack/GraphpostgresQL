@@ -317,7 +317,7 @@ BEGIN
       --- being a function call, by the way).
       lookups := lookups || format('.%I', sub.selector);
     END CASE;
-    labels  := labels  || format('%I', sub.selector);
+    labels := labels || format('%I', sub.selector);
   END LOOP;
   q := format(E'SELECT to_json(_) AS %I\n'
                '  FROM (VALUES (%s)) AS _(%s)',
