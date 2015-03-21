@@ -16,6 +16,9 @@ SELECT friendship.*, l._||' -> '||r._ AS who FROM friendship,
          LATERAL (SELECT full_name FROM "user" WHERE first = id) AS l(_),
          LATERAL (SELECT full_name FROM "user" WHERE second = id) AS r(_);
 
+--- Remove the table label.
+\C
+
 DO $$
 DECLARE
   graphql_q text = E'user("f3411edc-e1d0-452a-bc19-b42c0d5a0e36") {\n'
