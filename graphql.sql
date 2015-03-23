@@ -3,6 +3,8 @@ BEGIN;
 DROP SCHEMA IF EXISTS graphql CASCADE;
 CREATE SCHEMA graphql;
 
+CREATE EXTENSION IF NOT EXISTS hstore WITH SCHEMA public;
+
 /* * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * //
 
 # Syntax
@@ -55,7 +57,7 @@ type.
 // * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * * */
 
 
-SET LOCAL search_path TO graphql;     -- Ensure defs are created in this schema
+SET LOCAL search_path TO graphql, public;
 --- However, we still qualify references between functions -- as when `to_sql`
 --- calls `parse_many` -- because the search_path will be different when the
 --- code is run by the application/user.
@@ -161,6 +163,91 @@ BEGIN
                  FROM graphql.parse_many(expr);
 END
 $$ LANGUAGE plpgsql STABLE STRICT;
+
+
+--- The selector is a table; we should do a table lookup.
+CREATE FUNCTION to_sql(selector regclass, args hstore, body text)
+RETURNS text AS $$
+DECLARE
+  tab ALIAS FOR selector;
+  sub record;
+BEGIN
+  FOR sub IN SELECT * FROM graphql.parse_many(body) LOOP
+    CASE
+    WHEN sub.selector IN (SELECT unnest(cols) FROM graphql.fk(tab)) THEN
+      --- A column reference that REFERENCES another table.
+    WHEN sub.selector IN (SELECT col FROM graphql.cols(tab)) THEN
+      --- A simple column reference.
+      --- graphql.to_sql(name(sub.selector), sub.args, sub.body);
+    WHEN tab IN (SELECT other FROM graphql.fk(regclass(sub.selector))) THEN
+      --- TODO
+    ELSE
+      RAISE EXCEPTION 'We are only able to branch to a column or a JOIN table '
+                      'when the base selector is a table';
+    END CASE;
+  END LOOP;
+END
+$$ LANGUAGE plpgsql STABLE;
+
+--- The selector involves a foreign key and perhaps a JOIN table; we should do
+--- a JOIN.
+CREATE FUNCTION to_sql(selector graphql.fk, args hstore, body text)
+RETURNS text AS $$
+BEGIN
+--- TODO
+END
+$$ LANGUAGE plpgsql STABLE;
+
+--- The selector is the name of a column or sub-element of a row.
+CREATE FUNCTION to_sql(selector name, args hstore, body text)
+RETURNS text AS $$
+BEGIN
+--- TODO
+END
+$$ LANGUAGE plpgsql STABLE;
+
+--- The selector is a lookup key in an `hstore`, `jsonb` or `json` column.
+CREATE FUNCTION to_sql(selector text, args hstore, body text)
+RETURNS text AS $$
+BEGIN
+--- TODO
+END
+$$ LANGUAGE plpgsql STABLE;
+
+--- The selector is an actual stored procedure.
+CREATE FUNCTION to_sql(selector regprocedure, args hstore, body text)
+RETURNS text AS $$
+BEGIN
+--- TODO
+END
+$$ LANGUAGE plpgsql STABLE;
+
+
+--- The as_label interface returns an escaped identifier for something of the
+--- given type, for use as a key in the returned GraphQL data.
+
+--- For tables, we want just the tablename; since there is no concept of
+--- schema-qualified names in GraphQL.
+CREATE FUNCTION as_label(selector regclass) RETURNS text AS $$
+  SELECT format('%I', relname)
+    FROM LATERAL (SELECT * FROM pg_class WHERE oid = 'pg_type'::regclass) AS _;
+$$ LANGUAGE sql STABLE STRICT;
+
+--- We look for the table containing the REFERENCE and use its name.
+CREATE FUNCTION as_label(selector graphql.fk) RETURNS text AS $$
+  SELECT graphql.as_label(selector.tab);
+$$ LANGUAGE sql STABLE STRICT;
+
+--- We escape the name of the column.
+CREATE FUNCTION as_label(selector name) RETURNS text AS $$
+  SELECT format('%I', selector)
+$$ LANGUAGE sql STABLE STRICT;
+
+--- A text selector is likely a lookup key of some kind. It must be escaped.
+CREATE FUNCTION as_label(selector text) RETURNS text AS $$
+  SELECT format('%I', selector)
+$$ LANGUAGE sql STABLE STRICT;
+
 
 --- Base case (and entry point): looking up a row from a table.
 CREATE FUNCTION to_sql(selector regclass,
