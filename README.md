@@ -68,3 +68,13 @@ It's easy to remove GraphpostgresQL:
 ```sql
 DROP SCHEMA IF EXISTS graphql CASCADE;
 ```
+
+
+# Roadmap
+
+In **GraphpostgresQL64**, we'll introduce expanded selectors (nested selection
+in JSON columns, for example), an interface that accepts keyword parameters,
+and the ability to store and re-execute queries.
+
+In **GraphpostgresQL3D**, we'll introduce a PL/V8 implementation, with
+extensible parsing, hooks and overall more modular implementation.
