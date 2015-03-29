@@ -111,18 +111,16 @@ CREATE FUNCTION ns(tab regclass) RETURNS name AS $$
    WHERE pg_class.oid = tab
 $$ LANGUAGE sql STABLE STRICT;
 
-CREATE FUNCTION pk(t regclass) RETURNS name[] AS $$
-  SELECT cols FROM graphql.pk WHERE graphql.pk.tab = t;
+CREATE FUNCTION pk(t regclass) RETURNS graphql.pk AS $$
+  SELECT * FROM graphql.pk WHERE graphql.pk.tab = t;
 $$ LANGUAGE sql STABLE STRICT;
 
-CREATE FUNCTION cols(t regclass)
-RETURNS TABLE (num smallint, col name, typ regtype) AS $$
-  SELECT num, col, typ FROM graphql.cols WHERE graphql.cols.tab = t;
+CREATE FUNCTION cols(t regclass) RETURNS TABLE graphql.cols AS $$
+  SELECT * FROM graphql.cols WHERE graphql.cols.tab = t;
 $$ LANGUAGE sql STABLE STRICT;
 
-CREATE FUNCTION fk(t regclass)
-RETURNS TABLE (cols name[], other regclass, refs name[]) AS $$
-  SELECT cols, other, refs FROM graphql.fk WHERE graphql.fk.tab = t;
+CREATE FUNCTION fk(t regclass) RETURNS TABLE graphql.fk AS $$
+  SELECT * FROM graphql.fk WHERE graphql.fk.tab = t;
 $$ LANGUAGE sql STABLE STRICT;
 
 
@@ -171,16 +169,24 @@ RETURNS text AS $$
 DECLARE
   tab ALIAS FOR selector;
   sub record;
+  fk graphql.fk;
+  col graphql.cols;
 BEGIN
   FOR sub IN SELECT * FROM graphql.parse_many(body) LOOP
     CASE
     WHEN sub.selector IN (SELECT unnest(cols) FROM graphql.fk(tab)) THEN
       --- A column reference that REFERENCES another table.
-    WHEN sub.selector IN (SELECT col FROM graphql.cols(tab)) THEN
+    WHEN name(sub.selector) IN (SELECT col FROM graphql.cols(tab)) THEN
       --- A simple column reference.
-      --- graphql.to_sql(name(sub.selector), sub.args, sub.body);
+      SELECT * INTO STRICT col FROM graphql.cols(tab)
+       WHERE col = name(sub.selector);
+      graphql.to_sql(col, sub.predicate, sub.body);
     WHEN tab IN (SELECT other FROM graphql.fk(regclass(sub.selector))) THEN
-      --- TODO
+      --- A reference to a table that REFERENCES this table.
+      SELECT * INTO STRICT fk FROM graphql.fk(regclass(sub.selector))
+       WHERE other = graphql.to_sql.tab
+       LIMIT 1; -- Rely on ordering in VIEW to get first one in column order.
+      graphql.to_sql(fk, sub.predicate, sub.body);
     ELSE
       RAISE EXCEPTION 'We are only able to branch to a column or a JOIN table '
                       'when the base selector is a table';
@@ -198,8 +204,8 @@ BEGIN
 END
 $$ LANGUAGE plpgsql STABLE;
 
---- The selector is the name of a column or sub-element of a row.
-CREATE FUNCTION to_sql(selector name, args hstore, body text)
+--- The selector is a column.
+CREATE FUNCTION to_sql(selector graphql.cols, args hstore, body text)
 RETURNS text AS $$
 BEGIN
 --- TODO
@@ -239,8 +245,8 @@ CREATE FUNCTION as_label(selector graphql.fk) RETURNS text AS $$
 $$ LANGUAGE sql STABLE STRICT;
 
 --- We escape the name of the column.
-CREATE FUNCTION as_label(selector name) RETURNS text AS $$
-  SELECT format('%I', selector)
+CREATE FUNCTION as_label(selector graphql.cols) RETURNS text AS $$
+  SELECT format('%I', selector.col)
 $$ LANGUAGE sql STABLE STRICT;
 
 --- A text selector is likely a lookup key of some kind. It must be escaped.
