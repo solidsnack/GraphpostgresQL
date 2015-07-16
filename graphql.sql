@@ -183,6 +183,11 @@ BEGIN
   IF predicate IS NOT NULL THEN
     SELECT array_agg(_) INTO STRICT pk
       FROM jsonb_array_elements_text(jsonb('['||predicate||']')) AS __(_);
+    IF graphql.pk(tab) IS NULL THEN
+      RAISE EXCEPTION 'A plain predicate was passed, but there is no primary '
+                      'key for %.',
+                      selector;
+    END IF;
     predicates := predicates
                || graphql.format_comparison(tab, graphql.pk(tab), pk);
   END IF;
