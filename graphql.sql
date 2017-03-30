@@ -313,7 +313,7 @@ BEGIN
       lookups := lookups || format('%I->%L', selector, sub.selector);
     WHEN regtype('hstore') THEN
       IF sub.body IS NOT NULL THEN
-        RAISE EXCEPTION 'No fields below this level (column % is hstore)',
+        RAISE EXCEPTION 'No fields below this level (column %.% is hstore)',
                         tab, col;
       END IF;
       lookups := lookups || format('%I->%L', selector, sub.selector);
